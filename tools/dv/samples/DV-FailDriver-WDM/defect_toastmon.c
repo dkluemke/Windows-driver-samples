@@ -378,7 +378,7 @@ Return Value:
         // We cannot touch the device (send it any non pnp irps) until a
         // start device has been passed down to the lower drivers.
         //
-        IoCopyCurrentIrpStackLocationToNext(Irp);
+        // IoCopyCurrentIrpStackLocationToNext(Irp);
         IoMarkIrpPending(Irp);
         // IoSetCompletionRoutine(Irp,
         //     (PIO_COMPLETION_ROUTINE)Defect_ToastMon_CompletionRoutine_StartDevice,
@@ -387,6 +387,7 @@ Return Value:
         //     TRUE,
         //     TRUE); // No need for Cancel
 
+        IoSkipCurrentIrpStackLocation(Irp);
         IoCallDriver(deviceExtension->TopOfStack, Irp);
 
         IoReleaseRemoveLock(&deviceExtension->RemoveLock, Irp);
