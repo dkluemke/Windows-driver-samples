@@ -11,12 +11,12 @@ Module Name:
 
     defect_toastmon.c
 
-Abstract: This sample is designed to demonstrate the Driver Verifier 
-          functionality present in Windows.  A bug violating the 
+Abstract: This sample is designed to demonstrate the Driver Verifier
+          functionality present in Windows.  A bug violating the
           IrqlPsPassive rule is injected in the ToasterDrvCancelQueuedReadIrps
           callback.  Running the Device Fundamentals PNP Surprise Remove test
           with Driver Verifier enabled on this Defect_Toastmon driver will create
-          a bugcheck (0xC4) describing the error.  
+          a bugcheck (0xC4) describing the error.
 
           This driver should not be used as a sample to build a new driver from.
 
@@ -26,7 +26,7 @@ Environment:
 
 Revision History:
 
-         Injected defect to demonstrate DV capabilities and cleaned sample 
+         Injected defect to demonstrate DV capabilities and cleaned sample
          (7/14/2015)
 
          Added module to demonstrate how to register and receive WMI
@@ -285,9 +285,46 @@ Return Value:
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
+NTSTATUS
+Defect_ToastMon_CompletionRoutine_StartDevice(
+    PDEVICE_OBJECT   DeviceObject,
+    PIRP             Irp,
+    PVOID            Context
+    )
+/*++
+
+Routine Description:
+
+    The completion routine for IRP_MN_START_DEVICE.
+
+Arguments:
+
+   DeviceObject - pointer to a device object.
+
+   Irp - pointer to an I/O Request Packet.
+
+   Context - pointer to an event object.
+
+Return Value:
+
+    NT status code STATUS_CONTINUE_COMPLETION
+
+--*/
+
+{
+    PDEVICE_EXTENSION   deviceExtension;
+
+    UNREFERENCED_PARAMETER (Context);
+
+    deviceExtension = (PDEVICE_EXTENSION) DeviceObject->DeviceExtension;
+    SET_NEW_PNP_STATE(deviceExtension, Started);
+
+    IoReleaseRemoveLock(&deviceExtension->RemoveLock, Irp);
+    return STATUS_CONTINUE_COMPLETION;
+}
 
 NTSTATUS
-Defect_ToastMon_DispatchPnp (
+Defect_ToastMon_DispatchPnp(
     PDEVICE_OBJECT DeviceObject,
     PIRP Irp
     )
@@ -314,37 +351,23 @@ Return Value:
 {
     PIO_STACK_LOCATION          irpStack;
     NTSTATUS                    status = STATUS_SUCCESS;
-    KEVENT                      event;
     PDEVICE_EXTENSION           deviceExtension;
     PLIST_ENTRY                 thisEntry;
     PDEVICE_INFO                list;
 
-
-
-
-
     deviceExtension = (PDEVICE_EXTENSION) DeviceObject->DeviceExtension;
-	
-
 
     irpStack = IoGetCurrentIrpStackLocation(Irp);
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "Defect_Toastmon: %s IRP:0x%p \n",
                 PnPMinorFunctionString(irpStack->MinorFunction), Irp);
-         
 
     status = IoAcquireRemoveLock (&deviceExtension->RemoveLock, Irp);
-    if (!NT_SUCCESS (status)) 
+    if (!NT_SUCCESS (status))
     {
         Irp->IoStatus.Status = status;
         IoCompleteRequest (Irp, IO_NO_INCREMENT);
         return status;
     }
-    
-	
-
-
-    
-    
 
     switch (irpStack->MinorFunction) {
     case IRP_MN_START_DEVICE:
@@ -356,54 +379,30 @@ Return Value:
         // start device has been passed down to the lower drivers.
         //
         IoCopyCurrentIrpStackLocationToNext(Irp);
-        KeInitializeEvent(&event,
-                          NotificationEvent,
-                          FALSE
-                          );
+        IoMarkIrpPending(Irp);
+        // IoSetCompletionRoutine(Irp,
+        //     (PIO_COMPLETION_ROUTINE)Defect_ToastMon_CompletionRoutine_StartDevice,
+        //     NULL,
+        //     TRUE,
+        //     TRUE,
+        //     TRUE); // No need for Cancel
 
-        IoSetCompletionRoutine(Irp,
-                           (PIO_COMPLETION_ROUTINE)Defect_ToastMon_CompletionRoutine,
-                           &event,
-                           TRUE,
-                           TRUE,
-                           TRUE); // No need for Cancel
+        IoCallDriver(deviceExtension->TopOfStack, Irp);
 
-        status = IoCallDriver(deviceExtension->TopOfStack, Irp);
-
-        if (STATUS_PENDING == status) {
-            KeWaitForSingleObject(
-               &event,
-               Executive, // Waiting for reason of a driver
-               KernelMode, // Waiting in kernel mode
-               FALSE, // No alert
-               NULL); // No timeout
-            status = Irp->IoStatus.Status;
-        }
-
-        if (NT_SUCCESS(status)) {
-
-            SET_NEW_PNP_STATE(deviceExtension, Started);
-        }
-
-        //
-        // We must now complete the IRP, since we stopped it in the
-        // completion routine with STATUS_MORE_PROCESSING_REQUIRED.
-        //
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
         IoReleaseRemoveLock(&deviceExtension->RemoveLock, Irp);
+        status = STATUS_PENDING;
         return status;
 
     case IRP_MN_REMOVE_DEVICE:
 
-
         //
         // Wait for all outstanding requests to complete
         //
-        IoReleaseRemoveLockAndWait(&deviceExtension->RemoveLock, Irp);
         SET_NEW_PNP_STATE(deviceExtension, Deleted);
         Irp->IoStatus.Status = STATUS_SUCCESS;
         IoSkipCurrentIrpStackLocation(Irp);
         status = IoCallDriver(deviceExtension->TopOfStack, Irp);
+        IoReleaseRemoveLockAndWait(&deviceExtension->RemoveLock, Irp);
 
         //
         // Unregister the interface notification
@@ -425,11 +424,12 @@ Return Value:
 
         IoDetachDevice(deviceExtension->TopOfStack);
         IoDeleteDevice(DeviceObject);
-		
+
 		return status;
 
 
     case IRP_MN_QUERY_STOP_DEVICE:
+
         SET_NEW_PNP_STATE(deviceExtension, StopPending);
         status = STATUS_SUCCESS;
         break;
@@ -454,6 +454,7 @@ Return Value:
         break;
 
     case IRP_MN_STOP_DEVICE:
+
         SET_NEW_PNP_STATE(deviceExtension, Stopped);
         status = STATUS_SUCCESS;
         break;
@@ -461,11 +462,10 @@ Return Value:
     case IRP_MN_QUERY_REMOVE_DEVICE:
 
         SET_NEW_PNP_STATE(deviceExtension, RemovePending);
-        status = STATUS_SUCCESS;  
+        status = STATUS_SUCCESS;
         break;
 
     case IRP_MN_SURPRISE_REMOVAL:
-
 
 	    SET_NEW_PNP_STATE(deviceExtension, SurpriseRemovePending);
 	    ToasterDrvCancelQueuedReadIrps(deviceExtension);
@@ -551,7 +551,7 @@ Return Value:
         return status;
     }
 
-    switch( minorFunction ) 
+    switch( minorFunction )
     {
 		case IRP_MN_QUERY_POWER:
 			PoStartNextPowerIrp(Irp);
@@ -561,7 +561,7 @@ Return Value:
 			return status;
 			break;
 		case IRP_MN_SET_POWER:
-			switch( powerType ) 
+			switch( powerType )
 			{
 				case DevicePowerState:
 				    PoStartNextPowerIrp(Irp);
@@ -624,10 +624,10 @@ Return Value:
 {
     PDEVICE_EXTENSION   deviceExtension;
 	NTSTATUS status= STATUS_SUCCESS;
-    
+
     deviceExtension = (PDEVICE_EXTENSION) DeviceObject->DeviceExtension;
     status = IoAcquireRemoveLock (&deviceExtension->RemoveLock, Irp);
-    if (!NT_SUCCESS (status)) 
+    if (!NT_SUCCESS (status))
     {
         Irp->IoStatus.Status = status;
         IoCompleteRequest (Irp, IO_NO_INCREMENT);
@@ -711,7 +711,7 @@ Return Value:
         return status;
     }
 
-    if (NotStarted == deviceExtension->DevicePnPState) 
+    if (NotStarted == deviceExtension->DevicePnPState)
 	{
         //
         // We fail all the IRPs that arrive before the device is started.
@@ -882,8 +882,8 @@ Return Value:
         ExAcquireFastMutex (&deviceExtension->ListMutex);
         InsertTailList(&deviceExtension->DeviceListHead, &list->ListEntry);
         ExReleaseFastMutex (&deviceExtension->ListMutex);
-    }  
-    else 
+    }
+    else
     {
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Removal Interface Notification\n"));
     }
@@ -891,7 +891,10 @@ Return Value:
 
  Error:
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL, "Defect_Toastmon: PnPNotifyInterfaceChange failed: %x\n", status);
-    Defect_ToastMon_CloseTargetDevice(list);
+    if (list != NULL)
+    {
+        Defect_ToastMon_CloseTargetDevice(list);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1298,12 +1301,12 @@ Return Value:
     KIRQL oldIrql;
     BOOLEAN CancelIrp;
     PDEVICE_EXTENSION       deviceExtension = (PDEVICE_EXTENSION) DeviceObject->DeviceExtension;
-	
+
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Entered Defect_ToastMon_DispatchRead \n"));
 
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Attempting to acquire remove lock\n"));
     status = IoAcquireRemoveLock (&deviceExtension->RemoveLock, Irp);
-    if (!NT_SUCCESS (status)) 
+    if (!NT_SUCCESS (status))
     {
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL, ("Defect_Toastmon: Acquire remove lock failed; the device is already removed\n"));
         Irp->IoStatus.Information = 0;
@@ -1323,7 +1326,7 @@ Return Value:
     //
     // Let us check to see if the IRP is cancelled at this point.
     //
-    if(Irp->Cancel!=FALSE) 
+    if(Irp->Cancel!=FALSE)
     {
         //
         // This irp has been marked cancelled. This may have occured
@@ -1336,14 +1339,13 @@ Return Value:
         // routine is still there.
         //
 
-		
         status = STATUS_CANCELLED;
-	if (IoSetCancelRoutine(Irp, NULL) != NULL) 
+	if (IoSetCancelRoutine(Irp, NULL) != NULL)
 	{
             CancelIrp = TRUE;
         }
     }
-    else 
+    else
     {
         //
         // Queue the IRP and return status pending.
@@ -1362,7 +1364,7 @@ Return Value:
 
     KeReleaseSpinLock(&deviceExtension->RecvQueueLock, oldIrql);
 
-   if (CancelIrp != FALSE) 
+   if (CancelIrp != FALSE)
    {
         Irp->IoStatus.Status = STATUS_CANCELLED;
         Irp->IoStatus.Information = 0;
@@ -1370,7 +1372,7 @@ Return Value:
 		DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Release the removelock \n"));
         IoReleaseRemoveLock (&deviceExtension->RemoveLock, Irp);
     }
-	
+
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Exiting Defect_ToastMon_DispatchRead \n"));
     return status;
 }
@@ -1407,8 +1409,8 @@ Return Value:
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Canceling Read Request inside Defect_ToastmonCancelRoutineForReadIrp\n"));
 
     //
-    // Release the cancel spin lock and pass Irp->CancelIrql to 
-    // restore the original Irql prior to the call to IoAcquireCancelSpinLock 
+    // Release the cancel spin lock and pass Irp->CancelIrql to
+    // restore the original Irql prior to the call to IoAcquireCancelSpinLock
     //
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Releasing the cancel spinlock\n"));
     IoReleaseCancelSpinLock(Irp->CancelIrql);
@@ -1474,14 +1476,14 @@ Return Value:
 
 
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Canceling queued IRPs inside ToasterDrvCancelQueuedReadIrps"));
-	
+
 	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, ("Defect_Toastmon: Acquire the RecvQueueLock before checking the RecvQueue as cancellation may also run at the same time"));
     KeAcquireSpinLock(&deviceExtension->RecvQueueLock, &oldIrql);
     ListEmpty=IsListEmpty(&deviceExtension->RecvQueueHead);
     if(ListEmpty)
     {
 		// injected defect for IrqlPsPassive SDV and DV rule
-#pragma warning(suppress: 28159) // this is the injected defect 
+#pragma warning(suppress: 28159) // this is the injected defect
 #pragma warning(suppress: 28121)
 		PsGetVersion(&MajorVersion, &MinorVersion, &BuildNumber, NULL);
         KeReleaseSpinLock(&deviceExtension->RecvQueueLock, oldIrql);
